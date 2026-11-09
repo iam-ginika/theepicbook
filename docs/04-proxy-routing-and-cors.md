@@ -4,12 +4,12 @@
 
 ## Routes
 
-| Location | Upstream | Serves |
-|---|---|---|
-| `/assets/` | `http://frontend:80` | CSS, JavaScript and images |
-| `= /health` | `http://backend:8080` | Application health endpoint |
-| `/api/` | `http://backend:8080` | Cart API |
-| `/` | `http://backend:8080` | Server-rendered pages: `/`, `/cart`, `/gallery`, `/category/:name` |
+| Location    | Upstream              | Serves                                                             |
+|-------------|-----------------------|--------------------------------------------------------------------|
+| `/assets/`  | `http://frontend:80`  | CSS, JavaScript and images                                         |
+| `= /health` | `http://backend:8080` | Application health endpoint                                        |
+| `/api/`     | `http://backend:8080` | Cart API                                                           |
+| `/`         | `http://backend:8080` | Server-rendered pages: `/`, `/cart`, `/gallery`, `/category/:name` |
 
 Upstreams use Docker Compose service names. Nginx uses Docker's DNS (`127.0.0.11`) and resolves the names per request, so a recreated container with a new IP is picked up without restarting the proxy.
 

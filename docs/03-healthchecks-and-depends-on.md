@@ -2,12 +2,12 @@
 
 ## Health checks
 
-| Service | Check | Healthy means |
-|---|---|---|
-| database | `mysqladmin ping -h 127.0.0.1` | MySQL answers on TCP. First-run seeding uses the socket only, so this stays unhealthy until seeding has finished |
-| backend | `wget` to `http://127.0.0.1:8080/health` | Express is listening and Sequelize can reach MySQL. BusyBox `wget` ships in the Alpine runtime image, so nothing extra is installed |
-| frontend | `wget` to `http://127.0.0.1/assets/css/style.css` | Nginx is serving a real file from the web root |
-| reverse-proxy | `wget` to `http://127.0.0.1/health` | The proxy can resolve the backend and carry a request end to end |
+| Service       | Check                                             | Healthy means                                                                                                                       |
+|---------------|---------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------|
+| database      | `mysqladmin ping -h 127.0.0.1`                    | MySQL answers on TCP. First-run seeding uses the socket only, so this stays unhealthy until seeding has finished                    |
+| backend       | `wget` to `http://127.0.0.1:8080/health`          | Express is listening and Sequelize can reach MySQL. BusyBox `wget` ships in the Alpine runtime image, so nothing extra is installed |
+| frontend      | `wget` to `http://127.0.0.1/assets/css/style.css` | Nginx is serving a real file from the web root                                                                                      |
+| reverse-proxy | `wget` to `http://127.0.0.1/health`               | The proxy can resolve the backend and carry a request end to end                                                                    |
 
 ## Startup order
 

@@ -18,24 +18,24 @@ Containers and networks are removed. The `db_data` volume, `backups/` and `logs/
 
 ## Health and logs
 
-| Need | Command |
-|---|---|
-| Service status | `docker compose ps` |
-| Public health | `curl -i http://<VM_PUBLIC_IP>/health` |
-| Backend logs | `docker compose logs --tail=100 backend` |
-| Database logs | `docker compose logs --tail=100 database` |
-| Proxy access log | `tail -n 50 logs/proxy/access.log` |
-| Proxy error log | `tail -n 50 logs/proxy/error.log` |
+| Need             | Command                                   |
+|------------------|-------------------------------------------|
+| Service status   | `docker compose ps`                       |
+| Public health    | `curl -i http://<VM_PUBLIC_IP>/health`    |
+| Backend logs     | `docker compose logs --tail=100 backend`  |
+| Database logs    | `docker compose logs --tail=100 database` |
+| Proxy access log | `tail -n 50 logs/proxy/access.log`        |
+| Proxy error log  | `tail -n 50 logs/proxy/error.log`         |
 
 ## Safe restarts
 
-| Service | Command | Impact |
-|---|---|---|
-| reverse-proxy | `docker compose restart reverse-proxy` | Site unavailable for a few seconds |
-| Reload proxy config only | `docker compose exec reverse-proxy nginx -s reload` | None |
-| frontend | `docker compose restart frontend` | Styles and images fail briefly |
-| backend | `docker compose restart backend` | Pages and API return 502 until it is back |
-| database | Take a backup, then `docker compose restart database` | Data pages return 503 until MySQL is healthy; backend reconnects on its own |
+| Service                  | Command                                               | Impact                                                                      |
+|--------------------------|-------------------------------------------------------|-----------------------------------------------------------------------------|
+| reverse-proxy            | `docker compose restart reverse-proxy`                | Site unavailable for a few seconds                                          |
+| Reload proxy config only | `docker compose exec reverse-proxy nginx -s reload`   | None                                                                        |
+| frontend                 | `docker compose restart frontend`                     | Styles and images fail briefly                                              |
+| backend                  | `docker compose restart backend`                      | Pages and API return 502 until it is back                                   |
+| database                 | Take a backup, then `docker compose restart database` | Data pages return 503 until MySQL is healthy; backend reconnects on its own |
 
 After any restart, wait for `healthy` in `docker compose ps`.
 
