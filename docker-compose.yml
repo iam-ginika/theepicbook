@@ -1,0 +1,106 @@
+name: epicbook
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  reverse-proxy:
+    image: nginx:1.28-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./proxy/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./logs/proxy:/var/log/nginx
+    networks:
+      - front-tier
+    depends_on:
+      frontend:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging: *default-logging
+
+  frontend:
+    build: ./frontend
+    image: ${FRONTEND_IMAGE:-epicbook-frontend:local}
+    restart: unless-stopped
+    networks:
+      - front-tier
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/assets/css/style.css"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    logging: *default-logging
+
+  backend:
+    build: ./backend
+    image: ${BACKEND_IMAGE:-epicbook-backend:local}
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      NODE_ENV: production
+      PORT: "8080"
+      JAWSDB_URL: mysql://${MYSQL_USER:?set in .env}:${MYSQL_PASSWORD:?set in .env}@database:3306/${MYSQL_DATABASE:?set in .env}
+    networks:
+      - front-tier
+      - back-tier
+    depends_on:
+      database:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    logging: *default-logging
+
+  database:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:?set in .env}
+      MYSQL_USER: ${MYSQL_USER:?set in .env}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set in .env}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set in .env}
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./db/BuyTheBook_Schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./db/author_seed.sql:/docker-entrypoint-initdb.d/02-author-seed.sql:ro
+      - ./db/books_seed.sql:/docker-entrypoint-initdb.d/03-books-seed.sql:ro
+    networks:
+      - back-tier
+    healthcheck:
+      # TCP on purpose: during first-run seeding MySQL listens on its socket only.
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$$MYSQL_ROOT_PASSWORD\" mysqladmin ping -h 127.0.0.1 -uroot --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    logging: *default-logging
+
+networks:
+  front-tier:
+  back-tier:
+    internal: true
+
+volumes:
+  db_data:
