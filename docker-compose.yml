@@ -32,7 +32,7 @@ services:
 
   frontend:
     build: ./frontend
-    image: ${FRONTEND_IMAGE:-epicbook-frontend:local}
+    image: ${FRONTEND_IMAGE:-epicbook-frontend:latest}
     restart: unless-stopped
     networks:
       - front-tier
@@ -46,7 +46,7 @@ services:
 
   backend:
     build: ./backend
-    image: ${BACKEND_IMAGE:-epicbook-backend:local}
+    image: ${BACKEND_IMAGE:-epicbook-backend:optimized}
     restart: unless-stopped
     read_only: true
     tmpfs:
