@@ -9,7 +9,6 @@ const db = require("./models");
 const PORT = process.env.PORT || 8080;
 
 const app = express();
-app.disable("x-powered-by");
 
 // One line per request on stdout. Path only: no query strings, headers or cookies.
 app.use((req, res, next) => {
