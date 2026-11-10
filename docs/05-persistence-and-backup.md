@@ -23,10 +23,10 @@ Do not use `docker compose down -v` or delete `db_data`. Neither is needed for a
 
 | Step                                              | Result                                     |
 |---------------------------------------------------|--------------------------------------------|
-| Backup file                                       | FILL IN: filename                          |
-| Backup timestamp (UTC)                            | FILL IN                                    |
+| Backup file                                       | bookstore_20261110T084105Z.sql             |
+| Backup timestamp (UTC)                            | 2026-11-10 08:41:05 UTC                    |
 | Test record                                       | `Book` id 54, "Three-Body Problem Trilogy" |
-| Book count before                                 | FILL IN (seed data: 54)                    |
-| After controlled delete of that record            | FILL IN (expected: 53, record absent)      |
-| After restore                                     | FILL IN (expected: 54, record present)     |
-| After `docker compose down` and `up -d` (no `-v`) | FILL IN (expected: 54, record present)     |
+| Book count before                                 | 54                                         |
+| After controlled delete of that record            | 53, test record absent                     |
+| After restore                                     | 54, test record present                    |
+| After `docker compose down` and `up -d` (no `-v`) | 54, test record present                    |
