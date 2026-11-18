@@ -4,3 +4,9 @@ node_modules
 backups/
 logs/
 *.log
+# Ansible / SSH
+*.pem
+*.key
+ansible/inventory.ini
+ansible/group_vars/*/vault.yml
+*.retry
