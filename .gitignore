@@ -10,3 +10,4 @@ logs/
 ansible/inventory.ini
 ansible/group_vars/*/vault.yml
 *.retry
+epicbook-aws-key
