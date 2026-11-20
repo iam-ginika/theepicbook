@@ -1,4 +1,3 @@
-# https://aka.ms/yaml
 # =============================================================================
 # EpicBook - Application Pipeline (Ansible configuration + deployment on AWS)
 #
@@ -9,13 +8,13 @@
 # whose IPs come from the Infrastructure Pipeline's outputs.
 #
 # WHY EVERY STAGE REINSTALLS ANSIBLE AND RE-DOWNLOADS THE KEY:
-# Each stage runs on a fresh, disposable Microsoft-hosted agent. Nothing
-# (installed packages, downloaded Secure Files, temp files) carries over
-# from one stage to the next - there is no shared filesystem. So every stage
-# that talks to the hosts sets up its own tools and its own copy of the key.
+# Stages are separate jobs. Even on the same self-hosted agent, each job gets
+# a clean workspace and stages may run on different agents, so nothing
+# (downloaded Secure Files, temp files, venvs) is assumed to carry over.
+# Every stage that talks to the hosts sets up its own tools and key copy.
 #
 # SECRETS:
-# - SSH key: Secure File "epicbook-aws-key". DownloadSecureFile@1 places it in
+# - SSH key: Secure File "epicbook-azure-key". DownloadSecureFile@1 places it in
 #   the agent temp directory (outside the repo workspace); it is moved to a
 #   600-mode path there and is never printed, copied into the repo, or
 #   published as an artifact.
@@ -25,7 +24,6 @@
 # =============================================================================
 
 trigger:
-- main
   branches:
     include:
       - main
@@ -49,8 +47,6 @@ variables:
   - group: Epicbook-mysql-secrets
 
   # ---- Tooling ----
-  - name: pythonVersion
-    value: '3.12'
   # Pinned to one major release so a new ansible-core cannot change templating
   # behaviour under us between runs. Bump deliberately.
   - name: ansiblePipSpec
@@ -75,13 +71,12 @@ variables:
   - name: ANSIBLE_NOCOLOR
     value: '1'
 
+# Self-hosted agent (Assignment 01). Its public IP (74.241.250.107) is the
+# one allowed through the EC2 security groups on port 22; Microsoft-hosted
+# agents use changing IPs and would be blocked.
 pool:
-  vmImage: ubuntu-latest
-  vmImage: 'ubuntu-latest'
+  name: SelfHostedPool
 
-steps:
-- script: echo Hello, world!
-  displayName: 'Run a one-line script'
 stages:
   # ---------------------------------------------------------------------------
   # STAGE 1 - Prepare
@@ -98,35 +93,38 @@ stages:
           - checkout: self
             clean: true
 
-- script: |
-    echo Add other tasks to build, test, and deploy your project.
-    echo See https://aka.ms/yaml
-  displayName: 'Run a multi-line script'
-          # UsePythonVersion + pip is more reliable than apt here: Ubuntu's
-          # apt "ansible" package lags far behind, and system-wide pip install
-          # on ubuntu-24.04 is blocked by PEP 668 ("externally managed").
-          - task: UsePythonVersion@0
-            displayName: 'Use Python $(pythonVersion)'
-            inputs:
-              versionSpec: '$(pythonVersion)'
+          # Ansible is installed with pip into a virtualenv in the agent temp
+          # dir: Ubuntu's apt "ansible" lags far behind, and system-wide pip on
+          # Ubuntu 24.04 is blocked by PEP 668 ("externally managed").
+          # (UsePythonVersion@0 is not used - it needs a pre-populated tool
+          # cache on self-hosted agents.)
 
           # The "ansible" package already bundles community.mysql and
           # ansible.posix, but we install them explicitly: the database role
           # needs community.mysql and the backend role uses
           # ansible.posix.synchronize.
+          # rsync is needed by ansible.posix.synchronize (backend role).
           - script: |
               set -euo pipefail
-              python -m pip install --upgrade pip
-              python -m pip install "$(ansiblePipSpec)"
-              ansible-galaxy collection install community.mysql ansible.posix
-              ansible --version
-            displayName: 'Install Ansible + collections'
+              if ! python3 -m venv --help >/dev/null 2>&1 || ! command -v rsync >/dev/null; then
+                sudo apt-get update -qq
+                sudo apt-get install -y -qq python3-venv rsync
+              fi
+              VENV="$(Agent.TempDirectory)/ansible-venv"
+              rm -rf "$VENV"
+              python3 -m venv "$VENV"
+              "$VENV/bin/python" -m pip install --quiet --upgrade pip
+              "$VENV/bin/python" -m pip install --quiet "$(ansiblePipSpec)"
+              "$VENV/bin/ansible-galaxy" collection install community.mysql ansible.posix
+              echo "##vso[task.prependpath]$VENV/bin"
+              "$VENV/bin/ansible" --version
+            displayName: 'Install Ansible + collections (venv)'
 
           - task: DownloadSecureFile@1
             name: sshKey
             displayName: 'Download SSH private key (Secure File)'
             inputs:
-              secureFile: 'epicbook-aws-key'
+              secureFile: 'epicbook-azure-key'
 
           # Move the key into its own 700-mode folder in the agent temp dir
           # (never the repo workspace) and save the path in a variable so
@@ -135,13 +133,13 @@ stages:
               set -euo pipefail
               KEY_DIR="$(Agent.TempDirectory)/ssh"
               mkdir -p "$KEY_DIR" && chmod 700 "$KEY_DIR"
-              mv "$(sshKey.secureFilePath)" "$KEY_DIR/epicbook-aws-key"
-              chmod 600 "$KEY_DIR/epicbook-aws-key"
-              echo "##vso[task.setvariable variable=sshKeyPath]$KEY_DIR/epicbook-aws-key"
+              mv "$(sshKey.secureFilePath)" "$KEY_DIR/epicbook-azure-key"
+              chmod 600 "$KEY_DIR/epicbook-azure-key"
+              echo "##vso[task.setvariable variable=sshKeyPath]$KEY_DIR/epicbook-azure-key"
               echo "SSH key staged with mode 600 in the agent temp directory."
             displayName: 'Stage SSH key (chmod 600)'
 
-          - script: rm -f "$(Agent.TempDirectory)/ssh/epicbook-aws-key"
+          - script: rm -f "$(Agent.TempDirectory)/ssh/epicbook-azure-key"
             displayName: 'Clean up SSH key'
             condition: always()
 
@@ -161,32 +159,37 @@ stages:
           - checkout: self
             clean: true
 
-          - task: UsePythonVersion@0
-            displayName: 'Use Python $(pythonVersion)'
-            inputs:
-              versionSpec: '$(pythonVersion)'
 
+          # rsync is needed by ansible.posix.synchronize (backend role).
           - script: |
               set -euo pipefail
-              python -m pip install --upgrade pip
-              python -m pip install "$(ansiblePipSpec)"
-              ansible-galaxy collection install community.mysql ansible.posix
-              ansible --version
-            displayName: 'Install Ansible + collections'
+              if ! python3 -m venv --help >/dev/null 2>&1 || ! command -v rsync >/dev/null; then
+                sudo apt-get update -qq
+                sudo apt-get install -y -qq python3-venv rsync
+              fi
+              VENV="$(Agent.TempDirectory)/ansible-venv"
+              rm -rf "$VENV"
+              python3 -m venv "$VENV"
+              "$VENV/bin/python" -m pip install --quiet --upgrade pip
+              "$VENV/bin/python" -m pip install --quiet "$(ansiblePipSpec)"
+              "$VENV/bin/ansible-galaxy" collection install community.mysql ansible.posix
+              echo "##vso[task.prependpath]$VENV/bin"
+              "$VENV/bin/ansible" --version
+            displayName: 'Install Ansible + collections (venv)'
 
           - task: DownloadSecureFile@1
             name: sshKey
             displayName: 'Download SSH private key (Secure File)'
             inputs:
-              secureFile: 'epicbook-aws-key'
+              secureFile: 'epicbook-azure-key'
 
           - script: |
               set -euo pipefail
               KEY_DIR="$(Agent.TempDirectory)/ssh"
               mkdir -p "$KEY_DIR" && chmod 700 "$KEY_DIR"
-              mv "$(sshKey.secureFilePath)" "$KEY_DIR/epicbook-aws-key"
-              chmod 600 "$KEY_DIR/epicbook-aws-key"
-              echo "##vso[task.setvariable variable=sshKeyPath]$KEY_DIR/epicbook-aws-key"
+              mv "$(sshKey.secureFilePath)" "$KEY_DIR/epicbook-azure-key"
+              chmod 600 "$KEY_DIR/epicbook-azure-key"
+              echo "##vso[task.setvariable variable=sshKeyPath]$KEY_DIR/epicbook-azure-key"
               echo "SSH key staged with mode 600 in the agent temp directory."
             displayName: 'Stage SSH key (chmod 600)'
 
@@ -213,14 +216,14 @@ stages:
                    -e "ansible_ssh_private_key_file=$SSH_KEY_PATH"; then
                 echo "All hosts reachable over SSH."
               else
-                echo "##vso[task.logissue type=error]SSH connectivity check failed: one or more hosts are unreachable. Check the inventory IPs, the EC2 security group (port 22 from Azure agents), and that the 'epicbook-aws-key' Secure File matches the instances' key pair."
+                echo "##vso[task.logissue type=error]SSH connectivity check failed: one or more hosts are unreachable. Check the inventory IPs, the EC2 security group (port 22 from the self-hosted agent IP), and that the 'epicbook-azure-key' Secure File matches the instances' key pair."
                 exit 1
               fi
             displayName: 'SSH connectivity check (ansible ping)'
             env:
               SSH_KEY_PATH: $(sshKeyPath)
 
-          - script: rm -f "$(Agent.TempDirectory)/ssh/epicbook-aws-key"
+          - script: rm -f "$(Agent.TempDirectory)/ssh/epicbook-azure-key"
             displayName: 'Clean up SSH key'
             condition: always()
 
@@ -240,32 +243,37 @@ stages:
           - checkout: self
             clean: true
 
-          - task: UsePythonVersion@0
-            displayName: 'Use Python $(pythonVersion)'
-            inputs:
-              versionSpec: '$(pythonVersion)'
 
+          # rsync is needed by ansible.posix.synchronize (backend role).
           - script: |
               set -euo pipefail
-              python -m pip install --upgrade pip
-              python -m pip install "$(ansiblePipSpec)"
-              ansible-galaxy collection install community.mysql ansible.posix
-              ansible --version
-            displayName: 'Install Ansible + collections'
+              if ! python3 -m venv --help >/dev/null 2>&1 || ! command -v rsync >/dev/null; then
+                sudo apt-get update -qq
+                sudo apt-get install -y -qq python3-venv rsync
+              fi
+              VENV="$(Agent.TempDirectory)/ansible-venv"
+              rm -rf "$VENV"
+              python3 -m venv "$VENV"
+              "$VENV/bin/python" -m pip install --quiet --upgrade pip
+              "$VENV/bin/python" -m pip install --quiet "$(ansiblePipSpec)"
+              "$VENV/bin/ansible-galaxy" collection install community.mysql ansible.posix
+              echo "##vso[task.prependpath]$VENV/bin"
+              "$VENV/bin/ansible" --version
+            displayName: 'Install Ansible + collections (venv)'
 
           - task: DownloadSecureFile@1
             name: sshKey
             displayName: 'Download SSH private key (Secure File)'
             inputs:
-              secureFile: 'epicbook-aws-key'
+              secureFile: 'epicbook-azure-key'
 
           - script: |
               set -euo pipefail
               KEY_DIR="$(Agent.TempDirectory)/ssh"
               mkdir -p "$KEY_DIR" && chmod 700 "$KEY_DIR"
-              mv "$(sshKey.secureFilePath)" "$KEY_DIR/epicbook-aws-key"
-              chmod 600 "$KEY_DIR/epicbook-aws-key"
-              echo "##vso[task.setvariable variable=sshKeyPath]$KEY_DIR/epicbook-aws-key"
+              mv "$(sshKey.secureFilePath)" "$KEY_DIR/epicbook-azure-key"
+              chmod 600 "$KEY_DIR/epicbook-azure-key"
+              echo "##vso[task.setvariable variable=sshKeyPath]$KEY_DIR/epicbook-azure-key"
               echo "SSH key staged with mode 600 in the agent temp directory."
             displayName: 'Stage SSH key (chmod 600)'
 
@@ -287,7 +295,7 @@ stages:
               EXTRA_VARS="$WORK/db-extra-vars.json"
               trap 'rm -f "$EXTRA_VARS"' EXIT
 
-              python - "$EXTRA_VARS" <<'PY'
+              python3 - "$EXTRA_VARS" <<'PY'
               import json, os, sys
               with open(sys.argv[1], "w") as f:
                   json.dump({
@@ -309,7 +317,7 @@ stages:
               # frontend's public IP. The full log is not published.
               sed -n '/^PLAY RECAP/,$p' "$WORK/ansible-run.log" > "$SUMMARY/play-recap.txt"
               echo "$RC" > "$SUMMARY/exit-code.txt"
-              ansible-inventory -i "$(inventoryPath)" --list 2>/dev/null | python -c '
+              ansible-inventory -i "$(inventoryPath)" --list 2>/dev/null | python3 -c '
               import json, sys
               inv = json.load(sys.stdin)
               hv = inv.get("_meta", {}).get("hostvars", {})
@@ -334,7 +342,7 @@ stages:
               targetPath: '$(Build.ArtifactStagingDirectory)/ansible-summary'
               artifact: 'ansible-run-summary'
 
-          - script: rm -f "$(Agent.TempDirectory)/ssh/epicbook-aws-key"
+          - script: rm -f "$(Agent.TempDirectory)/ssh/epicbook-azure-key"
             displayName: 'Clean up SSH key'
             condition: always()
 
@@ -396,6 +404,3 @@ stages:
               fi
               echo "==========================================================="
             displayName: 'Check play recap (0 failed / 0 unreachable) and print summary'
-
- 
-
