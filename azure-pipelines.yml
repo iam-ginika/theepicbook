@@ -1,19 +1,388 @@
-# Starter pipeline
-# Start with a minimal pipeline that you can customize to build and deploy your code.
-# Add steps that build, run tests, deploy, and more:
-# https://aka.ms/yaml
+# =============================================================================
+# EpicBook - Application Pipeline (Ansible configuration + deployment on AWS)
+#
+# Flow:  Prepare  ->  Validate  ->  Configure and Deploy  ->  Verify
+#
+# Targets: the two EC2 instances listed in ansible/inventory/hosts.ini
+# (frontend = Nginx reverse proxy, backend = Node.js EpicBook + RDS seeding),
+# whose IPs come from the Infrastructure Pipeline's outputs.
+#
+# WHY EVERY STAGE REINSTALLS ANSIBLE AND RE-DOWNLOADS THE KEY:
+# Each stage runs on a fresh, disposable Microsoft-hosted agent. Nothing
+# (installed packages, downloaded Secure Files, temp files) carries over
+# from one stage to the next - there is no shared filesystem. So every stage
+# that talks to the hosts sets up its own tools and its own copy of the key.
+#
+# SECRETS:
+# - SSH key: Secure File "epicbook-aws-key". DownloadSecureFile@1 places it in
+#   the agent temp directory (outside the repo workspace); it is moved to a
+#   600-mode path there and is never printed, copied into the repo, or
+#   published as an artifact.
+# - DB credentials: secret variables from the variable group below. Secret
+#   variables are NOT exposed to scripts automatically - they are mapped
+#   explicitly in the env: block of the one step that needs them.
+# =============================================================================
 
 trigger:
-- main
+  branches:
+    include:
+      - main
+  # Azure path filters are prefix matches, so "backend" covers
+  # backend/server.js, backend/package.json, backend/routes/, backend/models/,
+  # backend/views/, backend/config/ etc., and "frontend" covers frontend/public/.
+  paths:
+    include:
+      - ansible
+      - backend
+      - frontend
+      - db
+      - azure-pipelines.yml
+
+pr: none
+
+variables:
+  # ---- Secret variable group (Pipelines -> Library) ----
+  # Must contain mysqlAdminUsername and mysqlAdminPassword (mark the password
+  # as secret) and must authorize this pipeline under "Pipeline permissions".
+  - group: Epicbook-mysql-secrets
+
+  # ---- Tooling ----
+  - name: pythonVersion
+    value: '3.12'
+  # Pinned to one major release so a new ansible-core cannot change templating
+  # behaviour under us between runs. Bump deliberately.
+  - name: ansiblePipSpec
+    value: 'ansible>=11,<12'
+
+  # ---- Ansible paths (relative to the repo root) ----
+  - name: inventoryPath
+    value: 'ansible/inventory/hosts.ini'
+  - name: playbookPath
+    value: 'ansible/site.yml'
+
+  # Upper-case pipeline variables are exported to every script as environment
+  # variables. ansible.cfg lives in ansible/, but we run from the repo root,
+  # where Ansible would not find it - so point to it explicitly.
+  - name: ANSIBLE_CONFIG
+    value: '$(Build.SourcesDirectory)/ansible/ansible.cfg'
+  # Already in ansible.cfg; repeated here so a fresh agent with no
+  # known_hosts never stalls on an interactive host-key prompt.
+  - name: ANSIBLE_HOST_KEY_CHECKING
+    value: 'False'
+  # Plain-text output so the PLAY RECAP can be parsed reliably in Verify.
+  - name: ANSIBLE_NOCOLOR
+    value: '1'
 
 pool:
-  vmImage: ubuntu-latest
+  vmImage: 'ubuntu-latest'
 
-steps:
-- script: echo Hello, world!
-  displayName: 'Run a one-line script'
+stages:
+  # ---------------------------------------------------------------------------
+  # STAGE 1 - Prepare
+  # Fails fast if the toolchain can't be installed or the Secure File isn't
+  # authorized/downloadable, before any later stage starts. (Later stages run
+  # on new agents, so they repeat this setup - see header.)
+  # ---------------------------------------------------------------------------
+  - stage: Prepare
+    displayName: 'Prepare'
+    jobs:
+      - job: Prepare
+        displayName: 'Install Ansible and stage SSH key'
+        steps:
+          - checkout: self
+            clean: true
 
-- script: |
-    echo Add other tasks to build, test, and deploy your project.
-    echo See https://aka.ms/yaml
-  displayName: 'Run a multi-line script'
+          # UsePythonVersion + pip is more reliable than apt here: Ubuntu's
+          # apt "ansible" package lags far behind, and system-wide pip install
+          # on ubuntu-24.04 is blocked by PEP 668 ("externally managed").
+          - task: UsePythonVersion@0
+            displayName: 'Use Python $(pythonVersion)'
+            inputs:
+              versionSpec: '$(pythonVersion)'
+
+          # The "ansible" package already bundles community.mysql and
+          # ansible.posix, but we install them explicitly: the database role
+          # needs community.mysql and the backend role uses
+          # ansible.posix.synchronize.
+          - script: |
+              set -euo pipefail
+              python -m pip install --upgrade pip
+              python -m pip install "$(ansiblePipSpec)"
+              ansible-galaxy collection install community.mysql ansible.posix
+              ansible --version
+            displayName: 'Install Ansible + collections'
+
+          - task: DownloadSecureFile@1
+            name: sshKey
+            displayName: 'Download SSH private key (Secure File)'
+            inputs:
+              secureFile: 'epicbook-aws-key'
+
+          # Move the key into its own 700-mode folder in the agent temp dir
+          # (never the repo workspace) and save the path in a variable so
+          # later steps don't assume a fixed location.
+          - script: |
+              set -euo pipefail
+              KEY_DIR="$(Agent.TempDirectory)/ssh"
+              mkdir -p "$KEY_DIR" && chmod 700 "$KEY_DIR"
+              mv "$(sshKey.secureFilePath)" "$KEY_DIR/epicbook-aws-key"
+              chmod 600 "$KEY_DIR/epicbook-aws-key"
+              echo "##vso[task.setvariable variable=sshKeyPath]$KEY_DIR/epicbook-aws-key"
+              echo "SSH key staged with mode 600 in the agent temp directory."
+            displayName: 'Stage SSH key (chmod 600)'
+
+          - script: rm -f "$(Agent.TempDirectory)/ssh/epicbook-aws-key"
+            displayName: 'Clean up SSH key'
+            condition: always()
+
+  # ---------------------------------------------------------------------------
+  # STAGE 2 - Validate
+  # Static checks (inventory + playbook syntax), then a real SSH ping to
+  # every host. Deployment never starts if any host is unreachable.
+  # ---------------------------------------------------------------------------
+  - stage: Validate
+    displayName: 'Validate'
+    dependsOn: Prepare
+    jobs:
+      - job: Validate
+        displayName: 'Inventory, syntax and connectivity checks'
+        steps:
+          # Fresh agent: re-checkout, reinstall, re-download (see header).
+          - checkout: self
+            clean: true
+
+          - task: UsePythonVersion@0
+            displayName: 'Use Python $(pythonVersion)'
+            inputs:
+              versionSpec: '$(pythonVersion)'
+
+          - script: |
+              set -euo pipefail
+              python -m pip install --upgrade pip
+              python -m pip install "$(ansiblePipSpec)"
+              ansible-galaxy collection install community.mysql ansible.posix
+              ansible --version
+            displayName: 'Install Ansible + collections'
+
+          - task: DownloadSecureFile@1
+            name: sshKey
+            displayName: 'Download SSH private key (Secure File)'
+            inputs:
+              secureFile: 'epicbook-aws-key'
+
+          - script: |
+              set -euo pipefail
+              KEY_DIR="$(Agent.TempDirectory)/ssh"
+              mkdir -p "$KEY_DIR" && chmod 700 "$KEY_DIR"
+              mv "$(sshKey.secureFilePath)" "$KEY_DIR/epicbook-aws-key"
+              chmod 600 "$KEY_DIR/epicbook-aws-key"
+              echo "##vso[task.setvariable variable=sshKeyPath]$KEY_DIR/epicbook-aws-key"
+              echo "SSH key staged with mode 600 in the agent temp directory."
+            displayName: 'Stage SSH key (chmod 600)'
+
+          # Prints hosts, groups and group_vars (IPs, RDS hostname, port) -
+          # nothing secret: DB credentials are only passed in Stage 3.
+          - script: |
+              set -euo pipefail
+              ansible-inventory -i "$(inventoryPath)" --list
+            displayName: 'Validate inventory'
+
+          - script: |
+              set -euo pipefail
+              ansible-playbook "$(playbookPath)" -i "$(inventoryPath)" --syntax-check
+            displayName: 'Playbook syntax check'
+
+          # hosts.ini sets ansible_ssh_private_key_file to a workstation path
+          # (~/.ssh/...). Inventory variables take priority over --private-key,
+          # so the agent's key path is also passed as an extra-var (extra-vars
+          # always win). --private-key is kept for clarity.
+          - script: |
+              set -uo pipefail
+              if ansible -i "$(inventoryPath)" all -m ping \
+                   --private-key "$SSH_KEY_PATH" \
+                   -e "ansible_ssh_private_key_file=$SSH_KEY_PATH"; then
+                echo "All hosts reachable over SSH."
+              else
+                echo "##vso[task.logissue type=error]SSH connectivity check failed: one or more hosts are unreachable. Check the inventory IPs, the EC2 security group (port 22 from Azure agents), and that the 'epicbook-aws-key' Secure File matches the instances' key pair."
+                exit 1
+              fi
+            displayName: 'SSH connectivity check (ansible ping)'
+            env:
+              SSH_KEY_PATH: $(sshKeyPath)
+
+          - script: rm -f "$(Agent.TempDirectory)/ssh/epicbook-aws-key"
+            displayName: 'Clean up SSH key'
+            condition: always()
+
+  # ---------------------------------------------------------------------------
+  # STAGE 3 - Configure and Deploy
+  # Runs ansible/site.yml against both hosts and saves a non-sensitive run
+  # summary (PLAY RECAP, exit code, frontend IP) for the Verify stage.
+  # ---------------------------------------------------------------------------
+  - stage: ConfigureAndDeploy
+    displayName: 'Configure and Deploy'
+    dependsOn: Validate
+    jobs:
+      - job: Deploy
+        displayName: 'Run Ansible playbook'
+        steps:
+          # Fresh agent: re-checkout, reinstall, re-download (see header).
+          - checkout: self
+            clean: true
+
+          - task: UsePythonVersion@0
+            displayName: 'Use Python $(pythonVersion)'
+            inputs:
+              versionSpec: '$(pythonVersion)'
+
+          - script: |
+              set -euo pipefail
+              python -m pip install --upgrade pip
+              python -m pip install "$(ansiblePipSpec)"
+              ansible-galaxy collection install community.mysql ansible.posix
+              ansible --version
+            displayName: 'Install Ansible + collections'
+
+          - task: DownloadSecureFile@1
+            name: sshKey
+            displayName: 'Download SSH private key (Secure File)'
+            inputs:
+              secureFile: 'epicbook-aws-key'
+
+          - script: |
+              set -euo pipefail
+              KEY_DIR="$(Agent.TempDirectory)/ssh"
+              mkdir -p "$KEY_DIR" && chmod 700 "$KEY_DIR"
+              mv "$(sshKey.secureFilePath)" "$KEY_DIR/epicbook-aws-key"
+              chmod 600 "$KEY_DIR/epicbook-aws-key"
+              echo "##vso[task.setvariable variable=sshKeyPath]$KEY_DIR/epicbook-aws-key"
+              echo "SSH key staged with mode 600 in the agent temp directory."
+            displayName: 'Stage SSH key (chmod 600)'
+
+          # DB credentials arrive via env: (never via inline $(...) macros in
+          # the script text). They're written to a 600-mode JSON file in the
+          # agent temp dir and passed with -e @file instead of
+          # -e "key=value". This is because:
+          #   - key=value parsing breaks on passwords with spaces/quotes/'='
+          #   - the password stays off the process command line
+          # The file is deleted on exit. Nothing here echoes the values or the
+          # -e arguments, and the roles use no_log: true on every task that
+          # touches them.
+          - script: |
+              set -uo pipefail
+              umask 077
+              WORK="$(Agent.TempDirectory)/deploy"
+              SUMMARY="$(Build.ArtifactStagingDirectory)/ansible-summary"
+              mkdir -p "$WORK" "$SUMMARY"
+              EXTRA_VARS="$WORK/db-extra-vars.json"
+              trap 'rm -f "$EXTRA_VARS"' EXIT
+
+              python - "$EXTRA_VARS" <<'PY'
+              import json, os, sys
+              with open(sys.argv[1], "w") as f:
+                  json.dump({
+                      "db_admin_username": os.environ["DB_ADMIN_USERNAME"],
+                      "db_admin_password": os.environ["DB_ADMIN_PASSWORD"],
+                  }, f)
+              PY
+
+              # The key path is passed as an extra-var too, to override the
+              # workstation path in hosts.ini (see Validate stage).
+              ansible-playbook -i "$(inventoryPath)" "$(playbookPath)" \
+                --private-key "$SSH_KEY_PATH" \
+                -e "ansible_ssh_private_key_file=$SSH_KEY_PATH" \
+                -e "@$EXTRA_VARS" 2>&1 | tee "$WORK/ansible-run.log"
+              RC=${PIPESTATUS[0]}
+
+              # Non-sensitive summary for the Verify stage: only the PLAY
+              # RECAP block (host names + counters), the exit code, and the
+              # frontend's public IP. The full log is not published.
+              sed -n '/^PLAY RECAP/,$p' "$WORK/ansible-run.log" > "$SUMMARY/play-recap.txt"
+              echo "$RC" > "$SUMMARY/exit-code.txt"
+              ansible-inventory -i "$(inventoryPath)" --list 2>/dev/null | python -c '
+              import json, sys
+              inv = json.load(sys.stdin)
+              hv = inv.get("_meta", {}).get("hostvars", {})
+              for h in inv.get("frontend", {}).get("hosts", []):
+                  print(hv.get(h, {}).get("ansible_host", h))
+              ' > "$SUMMARY/frontend-hosts.txt" || true
+
+              rm -f "$WORK/ansible-run.log"
+              exit "$RC"
+            displayName: 'Run site.yml (configure + deploy + in-play verification)'
+            env:
+              SSH_KEY_PATH: $(sshKeyPath)
+              DB_ADMIN_USERNAME: $(mysqlAdminUsername)
+              DB_ADMIN_PASSWORD: $(mysqlAdminPassword)
+
+          # Published even if the playbook failed, so the recap is available
+          # to debug from. Contains no key material and no credentials.
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish run summary (non-sensitive)'
+            condition: succeededOrFailed()
+            inputs:
+              targetPath: '$(Build.ArtifactStagingDirectory)/ansible-summary'
+              artifact: 'ansible-run-summary'
+
+          - script: rm -f "$(Agent.TempDirectory)/ssh/epicbook-aws-key"
+            displayName: 'Clean up SSH key'
+            condition: always()
+
+  # ---------------------------------------------------------------------------
+  # STAGE 4 - Verify
+  # site.yml's own verification plays already ran in Stage 3. This stage does
+  # NOT re-run Ansible: it reads Stage 3's summary, checks the exit code and
+  # the PLAY RECAP counters, and prints a short human-readable result.
+  # No SSH key or credentials are needed here.
+  # ---------------------------------------------------------------------------
+  - stage: Verify
+    displayName: 'Verify'
+    dependsOn: ConfigureAndDeploy
+    jobs:
+      - job: Verify
+        displayName: 'Confirm play recap and summarize'
+        steps:
+          - checkout: none
+
+          - download: current
+            artifact: ansible-run-summary
+            displayName: 'Download run summary from Configure and Deploy'
+
+          - script: |
+              set -euo pipefail
+              DIR="$(Pipeline.Workspace)/ansible-run-summary"
+              RC="$(cat "$DIR/exit-code.txt")"
+              RECAP="$DIR/play-recap.txt"
+
+              # Recap lines look like:
+              #   app_server : ok=12 changed=3 unreachable=0 failed=0 skipped=0 ...
+              HOSTS=$(awk '/ : ok=/ {print $1}' "$RECAP" | sort -u)
+              FAILED=$(awk '/ : ok=/ {for(i=1;i<=NF;i++) if($i ~ /^failed=/){split($i,a,"="); s+=a[2]}} END{print s+0}' "$RECAP")
+              UNREACHABLE=$(awk '/ : ok=/ {for(i=1;i<=NF;i++) if($i ~ /^unreachable=/){split($i,a,"="); s+=a[2]}} END{print s+0}' "$RECAP")
+
+              echo "=============== EpicBook deployment summary ==============="
+              echo "ansible-playbook exit code : $RC"
+              echo "Hosts in play recap        :"
+              if [ -n "$HOSTS" ]; then
+                echo "$HOSTS" | sed 's/^/  - /'
+              else
+                echo "  (none)"
+              fi
+              echo "Total failed               : $FAILED"
+              echo "Total unreachable          : $UNREACHABLE"
+
+              if [ "$RC" != "0" ] || [ -z "$HOSTS" ] || [ "$FAILED" -ne 0 ] || [ "$UNREACHABLE" -ne 0 ]; then
+                echo "##vso[task.logissue type=error]Deployment verification failed: exit code $RC, failed=$FAILED, unreachable=$UNREACHABLE."
+                exit 1
+              fi
+
+              echo "Result                     : PASS - 0 failed / 0 unreachable"
+              echo ""
+              echo "Open the frontend in a browser to check it yourself:"
+              if [ -s "$DIR/frontend-hosts.txt" ]; then
+                sed 's|^|  http://|; s|$|/|' "$DIR/frontend-hosts.txt"
+              else
+                echo "  (frontend IP not captured - see ansible/inventory/hosts.ini [frontend])"
+              fi
+              echo "==========================================================="
+            displayName: 'Check play recap (0 failed / 0 unreachable) and print summary'
