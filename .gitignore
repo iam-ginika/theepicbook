@@ -11,3 +11,5 @@ ansible/inventory.ini
 ansible/group_vars/*/vault.yml
 *.retry
 epicbook-aws-key
+epicbook-azure-key
+epicbook-azure-key

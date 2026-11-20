@@ -1,21 +1,29 @@
 ---
-- name: Add NodeSource repository for Node.js
+# The whole repo is synced to /opt/epicbook, so the app lives in
+# /opt/epicbook/backend (server.js, package.json, config/) and the SQL files
+# in /opt/epicbook/db (used by the database role). Relative paths between
+# backend/ and frontend/ inside the repo are preserved.
+
+- name: Add NodeSource repository for Node.js 22 LTS
   ansible.builtin.shell: |
-    curl -fsSL https://deb.nodesource.com/setup_18.x | bash -
+    set -o pipefail
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
   args:
+    executable: /bin/bash
     creates: /etc/apt/sources.list.d/nodesource.list
 
-- name: Install Node.js and MySQL client tools
+- name: Install Node.js, MySQL client tools and rsync
   ansible.builtin.apt:
     name:
       - nodejs
       - mysql-client
+      - rsync
     state: present
     update_cache: true
 
 - name: Create application directory
   ansible.builtin.file:
-    path: /opt/epicbook
+    path: "{{ app_root }}"
     state: directory
     owner: ubuntu
     group: ubuntu
@@ -24,21 +32,27 @@
 - name: Deploy EpicBook application code
   ansible.posix.synchronize:
     src: "{{ playbook_dir }}/../"
-    dest: /opt/epicbook/
+    dest: "{{ app_root }}/"
     rsync_opts:
       - "--exclude=.git"
       - "--exclude=ansible"
       - "--exclude=node_modules"
+      - "--exclude=azure-pipelines.yml"
+      - "--chown=ubuntu:ubuntu"
+  notify: Restart epicbook
 
-- name: Install Node.js dependencies
-  ansible.builtin.command: npm ci --production
+- name: Install Node.js dependencies (production only)
+  ansible.builtin.command: npm ci --omit=dev
   args:
-    chdir: /opt/epicbook
+    chdir: "{{ app_dir }}"
+  become_user: ubuntu
+  register: npm_ci
+  changed_when: "'added' in npm_ci.stdout"
 
 - name: Deploy database configuration
   ansible.builtin.template:
     src: db-config.j2
-    dest: /opt/epicbook/config/config.json
+    dest: "{{ app_dir }}/config/config.json"
     owner: ubuntu
     group: ubuntu
     mode: '0600'
@@ -60,4 +74,3 @@
     enabled: true
     state: started
     daemon_reload: true
-

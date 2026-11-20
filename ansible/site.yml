@@ -1,3 +1,23 @@
+---
+- name: Configure common baseline on all hosts
+  hosts: all
+  become: true
+  roles:
+    - common
+
+- name: Configure frontend (Nginx)
+  hosts: frontend
+  become: true
+  roles:
+    - frontend
+
+- name: Configure backend (EpicBook + database)
+  hosts: backend
+  become: true
+  roles:
+    - backend
+    - database
+
 - name: Verify backend service and database
   hosts: backend
   become: true
@@ -12,9 +32,9 @@
       ansible.builtin.wait_for:
         host: 127.0.0.1
         port: "{{ backend_app_port }}"
-        timeout: 10
+        timeout: 30
 
-    - name: Confirm required tables exist and are populated
+    - name: Count Author rows
       community.mysql.mysql_query:
         login_host: "{{ mysql_fqdn }}"
         login_user: "{{ db_admin_username }}"
@@ -26,10 +46,10 @@
 
     - name: Fail if Author table is empty
       ansible.builtin.fail:
-        msg: "Author table has no rows — seed data import may have failed."
+        msg: "Author table has no rows - seed data import may have failed."
       when: verify_author_count.query_result[0][0].row_count == 0
 
-    - name: Confirm Book table is populated
+    - name: Count Book rows
       community.mysql.mysql_query:
         login_host: "{{ mysql_fqdn }}"
         login_user: "{{ db_admin_username }}"
@@ -41,7 +61,7 @@
 
     - name: Fail if Book table is empty
       ansible.builtin.fail:
-        msg: "Book table has no rows — seed data import may have failed."
+        msg: "Book table has no rows - seed data import may have failed."
       when: verify_book_count.query_result[0][0].row_count == 0
 
 - name: Verify frontend and end-to-end connectivity
@@ -67,6 +87,4 @@
 
     - name: Report verification success
       ansible.builtin.debug:
-        msg: "Frontend responded with HTTP {{ frontend_response.status }} — EpicBook is reachable end to end."
-
-
+        msg: "Frontend responded with HTTP {{ frontend_response.status }} - EpicBook is reachable end to end."

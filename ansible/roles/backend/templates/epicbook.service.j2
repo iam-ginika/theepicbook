@@ -5,7 +5,7 @@ After=network.target
 [Service]
 Type=simple
 User=ubuntu
-WorkingDirectory=/opt/epicbook
+WorkingDirectory={{ app_dir }}
 Environment=NODE_ENV=production
 Environment=PORT={{ backend_app_port }}
 ExecStart=/usr/bin/node server.js
