@@ -35,3 +35,17 @@
 - name: Test Nginx configuration
   ansible.builtin.command: nginx -t
   changed_when: false
+
+- name: Install rsync for static asset sync
+  ansible.builtin.apt:
+    name: rsync
+    state: present
+
+- name: Deploy frontend static assets (frontend/public)
+  ansible.posix.synchronize:
+    src: "{{ playbook_dir }}/../frontend/public/"
+    dest: /var/www/epicbook/
+    delete: true
+    rsync_opts:
+      - "--chmod=D755,F644"
+  notify: Reload nginx

@@ -1,8 +1,13 @@
 server {
     listen 80;
     server_name _;
+    root /var/www/epicbook;
 
     location / {
+        try_files $uri @backend;
+    }
+
+    location @backend {
         proxy_pass http://{{ backend_private_ip }}:{{ backend_app_port }};
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
