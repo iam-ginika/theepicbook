@@ -1,3 +1,4 @@
+# https://aka.ms/yaml
 # =============================================================================
 # EpicBook - Application Pipeline (Ansible configuration + deployment on AWS)
 #
@@ -24,6 +25,7 @@
 # =============================================================================
 
 trigger:
+- main
   branches:
     include:
       - main
@@ -74,8 +76,12 @@ variables:
     value: '1'
 
 pool:
+  vmImage: ubuntu-latest
   vmImage: 'ubuntu-latest'
 
+steps:
+- script: echo Hello, world!
+  displayName: 'Run a one-line script'
 stages:
   # ---------------------------------------------------------------------------
   # STAGE 1 - Prepare
@@ -92,6 +98,10 @@ stages:
           - checkout: self
             clean: true
 
+- script: |
+    echo Add other tasks to build, test, and deploy your project.
+    echo See https://aka.ms/yaml
+  displayName: 'Run a multi-line script'
           # UsePythonVersion + pip is more reliable than apt here: Ubuntu's
           # apt "ansible" package lags far behind, and system-wide pip install
           # on ubuntu-24.04 is blocked by PEP 668 ("externally managed").
@@ -386,3 +396,6 @@ stages:
               fi
               echo "==========================================================="
             displayName: 'Check play recap (0 failed / 0 unreachable) and print summary'
+
+ 
+
