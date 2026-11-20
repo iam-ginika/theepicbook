@@ -1,0 +1,2 @@
+backend_private_ip: "10.20.2.184"
+mysql_fqdn: "epicbook-mysql.c5eu2oe6id6t.eu-north-1.rds.amazonaws.com"
